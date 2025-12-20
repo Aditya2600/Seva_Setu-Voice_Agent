@@ -2,6 +2,9 @@
 
 SevaSetu is a Marathi voice assistant that helps users discover welfare schemes and check eligibility. It runs a WebSocket backend for STT/agent/TTS and a small frontend for live conversations.
 
+## Screenshot
+![Demo Screenshot](../Demo.png)
+
 ## Quick Start
 
 ### Backend
