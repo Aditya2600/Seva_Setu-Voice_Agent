@@ -1,9 +1,12 @@
 from __future__ import annotations
-import asyncio, shutil, subprocess, tempfile
+import asyncio, logging, shutil, subprocess, tempfile, time
 from functools import partial
 from pathlib import Path
 
+logger = logging.getLogger("sevasetu")
+
 def _convert_sync(input_bytes: bytes, mime_type: str = "audio/webm") -> Path:
+    t0 = time.perf_counter()
     tmp_dir = Path(tempfile.mkdtemp(prefix="sevasetu_audio_"))
     mt = (mime_type or "").lower()
     ext = ".dat"
@@ -15,6 +18,7 @@ def _convert_sync(input_bytes: bytes, mime_type: str = "audio/webm") -> Path:
 
     in_path = tmp_dir / f"input{ext}"
     out_path = tmp_dir / "audio.wav"
+    logger.debug("Audio convert start bytes=%d mime=%s", len(input_bytes), mime_type)
     in_path.write_bytes(input_bytes)
 
     cmd = [
@@ -27,7 +31,9 @@ def _convert_sync(input_bytes: bytes, mime_type: str = "audio/webm") -> Path:
     if proc.returncode != 0 or not out_path.exists():
         err = proc.stderr.decode("utf-8", errors="ignore")[:800]
         shutil.rmtree(tmp_dir, ignore_errors=True)
+        logger.error("FFmpeg failed code=%s err=%s", proc.returncode, err)
         raise RuntimeError(f"FFmpeg failed: {err}")
+    logger.debug("Audio convert done path=%s ms=%.0f", out_path, (time.perf_counter() - t0) * 1000)
     return out_path
 
 async def convert_to_wav(input_bytes: bytes, mime_type: str = "audio/webm") -> Path:
@@ -40,6 +46,7 @@ def cleanup_audio_file(file_path: Path | None):
     try:
         parent = file_path.parent
         if parent.name.startswith("sevasetu_audio_"):
+            logger.debug("Cleaning up audio temp dir=%s", parent)
             shutil.rmtree(parent, ignore_errors=True)
     except Exception:
-        pass
+        logger.exception("Audio cleanup failed path=%s", file_path)

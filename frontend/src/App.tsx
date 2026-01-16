@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { client } from './lib/api'
+import type { DebugLog } from './lib/api'
 import Recorder from './components/Recorder'
 import Chip from './components/Chip'
 import SchemeCard from './components/SchemeCard'
@@ -19,29 +20,61 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [interimText, setInterimText] = useState('')
   const interimRef = useRef('') // ✅ keeps latest STT safely for AGENT_START
+  const lastSttPushedRef = useRef('') // ✅ dedupe timeline spam
   const [status, setStatus] = useState('Connecting...')
   const [speaking, setSpeaking] = useState(false)
 
   const [toolEvents, setToolEvents] = useState<ToolEvt[]>([])
   const [showDebug, setShowDebug] = useState(true)
+  const [debugLogs, setDebugLogs] = useState<DebugLog[]>([])
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
 
+  const addLocalLog = (level: DebugLog['level'], event: string, message: string, payload?: any) => {
+    setDebugLogs((prev) => [...prev, { ts: Date.now(), level, event, message, payload }].slice(-120))
+  }
+
   // ✅ IMPORTANT FIX: Subscribe ONCE (no dependency on interimText)
   useEffect(() => {
+    const unsubDebug = client.onDebug((entry) => {
+      setDebugLogs((prev) => [...prev, entry].slice(-120))
+
+      if (entry.event === 'ws_open') setStatus('Online')
+
+      if (entry.event === 'ws_close' || entry.event === 'ws_error') {
+        setStatus('Reconnecting...')
+        setSpeaking(false)
+        if (audioRef.current) {
+          try {
+            audioRef.current.pause()
+          } catch {}
+          audioRef.current = null
+        }
+      }
+    })
+
     client.connect()
-    setStatus('Online')
+    setStatus('Connecting...')
 
     const unsub = client.onMessage((msg) => {
+      if (msg.type === 'hello_ack') {
+        setStatus('Online')
+        return
+      }
+
       // 1) STT results
       if (msg.type === 'stt_result') {
         const t = msg.text || ''
         interimRef.current = t
         setInterimText(t)
 
-        // add to timeline
-        setToolEvents((p) => [...p, { kind: 'stt', name: 'stt_result', payload: { text: t, confidence: msg.confidence } }])
+        // push to timeline only for final-ish STT and only if changed
+        const conf = Number(msg.confidence ?? 0)
+        if (t && conf > 0 && t !== lastSttPushedRef.current) {
+          lastSttPushedRef.current = t
+          setToolEvents((p) => [...p, { kind: 'stt', name: 'stt_result', payload: { text: t, confidence: conf } }])
+        }
       }
 
       // 2) agent events
@@ -94,6 +127,10 @@ export default function App() {
 
         // Auto-play audio
         if (msg.ttsAudioB64) {
+          addLocalLog('info', 'tts_play', 'Playing TTS audio', {
+            bytes: msg.ttsAudioB64.length,
+            mime: msg.ttsMime || 'audio/wav',
+          })
           if (audioRef.current) {
             audioRef.current.pause()
             audioRef.current = null
@@ -101,13 +138,36 @@ export default function App() {
           const snd = new Audio(`data:${msg.ttsMime || 'audio/wav'};base64,${msg.ttsAudioB64}`)
           audioRef.current = snd
           setSpeaking(true)
-          snd.onended = () => setSpeaking(false)
-          snd.play().catch((e) => console.error('Audio blocked:', e))
+          snd.onended = () => {
+            setSpeaking(false)
+            addLocalLog('debug', 'tts_end', 'TTS playback ended')
+          }
+          snd.play().catch((e) => {
+            addLocalLog('error', 'tts_play_error', 'TTS playback blocked', { error: String(e) })
+            console.error('Audio blocked:', e)
+          })
         }
+      }
+
+      // 5) backend error
+      if (msg.type === 'error') {
+        addLocalLog('error', 'backend_error', msg.message || 'Unknown backend error', msg)
+        setToolEvents((p) => [...p, { kind: 'agent_event', name: 'ERROR', payload: msg }])
+        setStatus('Error')
       }
     })
 
-    return () => unsub()
+    return () => {
+      unsub()
+      unsubDebug()
+      setSpeaking(false)
+      if (audioRef.current) {
+        try {
+          audioRef.current.pause()
+        } catch {}
+        audioRef.current = null
+      }
+    }
   }, [])
 
   // auto-scroll
@@ -120,140 +180,117 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen font-sans selection:bg-sky-500/30 flex bg-slate-950 text-slate-100">
-      {/* LEFT: Main Chat */}
-      <div className={`flex-1 flex flex-col relative transition-all duration-300 ${showDebug ? 'mr-80' : ''}`}>
-        {/* Header */}
-        <header className="fixed top-0 left-0 right-0 z-20 border-b border-slate-800/60 bg-slate-950/80 backdrop-blur-md">
-          <div className="max-w-4xl mx-auto px-4 h-14 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-sky-500 to-indigo-500 flex items-center justify-center shadow-lg shadow-sky-500/20">
-                <Bot className="text-white" size={20} />
+    <div className="app-shell">
+      <div className={`chat-pane ${showDebug ? 'shifted' : ''}`}>
+        <header className="app-header">
+          <div className="header-inner">
+            <div className="brand-row">
+              <div className="brand-mark">
+                <Bot size={18} />
               </div>
-              <span className="font-bold tracking-tight text-slate-100">SevaSetu</span>
-              <Chip>मराठी</Chip>
+              <div>
+                <div className="brand-title">SevaSetu</div>
+                <div className="brand-subtitle">Marathi welfare voice agent</div>
+              </div>
+              <Chip className="accent">मराठी</Chip>
             </div>
-            <div className="flex items-center gap-4">
-              <button
-                onClick={() => setShowDebug(!showDebug)}
-                className="text-xs text-slate-400 hover:text-white flex items-center gap-1"
-              >
+            <div className="header-actions">
+              <button onClick={() => setShowDebug(!showDebug)} className="btn btn-ghost">
                 <Activity size={14} /> {showDebug ? 'Hide Debug' : 'Show Debug'}
               </button>
-              <div className="text-xs font-mono text-slate-500">{status}</div>
+              <div className={`status-pill ${status === 'Online' ? '' : 'offline'}`}>{status}</div>
             </div>
           </div>
         </header>
 
-        {/* Chat Stream */}
-        <main className="pt-20 pb-48 px-4 max-w-2xl mx-auto w-full space-y-8">
-          {messages.length === 0 && (
-            <div className="text-center mt-20 opacity-60">
-              <p className="text-slate-300 text-lg">👋 नमस्कार! मी सेवासेतू आहे.</p>
-              <p className="text-sm text-slate-500 mt-2">मी तुम्हाला सरकारी योजना शोधण्यात आणि अर्ज करण्यात मदत करू शकतो.</p>
-              <p className="text-xs text-slate-600 mt-3">उदा: “मला शिष्यवृत्ती योजना हवी आहे” किंवा “लाडकी बहीण योजना”</p>
-            </div>
-          )}
-
-          {messages.map((m, i) => (
-            <div
-              key={i}
-              className={`flex gap-4 ${m.role === 'user' ? 'flex-row-reverse' : ''} animate-in fade-in slide-in-from-bottom-2 duration-300`}
-            >
-              {/* Avatar */}
-              <div
-                className={`shrink-0 w-8 h-8 rounded-full flex items-center justify-center shadow-lg ${
-                  m.role === 'assistant' ? 'bg-slate-800 text-sky-400' : 'bg-slate-800 text-slate-400'
-                }`}
-              >
-                {m.role === 'assistant' ? <Bot size={16} /> : <User size={16} />}
+        <main className="chat-main">
+          <div className="chat-inner">
+            {messages.length === 0 && (
+              <div className="intro-card fade-up">
+                <div className="intro-title">नमस्कार! मी सेवासेतू आहे.</div>
+                <div className="intro-sub">मी तुम्हाला सरकारी योजना शोधण्यात आणि अर्ज करण्यात मदत करू शकतो.</div>
+                <div className="prompt-row">
+                  <Chip className="accent">मला शिष्यवृत्ती योजना हवी आहे</Chip>
+                  <Chip className="accent">लाडकी बहीण योजना</Chip>
+                </div>
               </div>
+            )}
 
-              <div className="space-y-3 max-w-[85%]">
-                {/* Bubble */}
-                <div
-                  className={`px-5 py-3 rounded-2xl text-[15px] leading-relaxed whitespace-pre-wrap shadow-md ${
-                    m.role === 'user'
-                      ? 'bg-slate-800 text-slate-200 rounded-tr-none'
-                      : 'bg-slate-900/50 border border-slate-800 text-slate-300 rounded-tl-none'
-                  }`}
-                >
-                  {m.text}
+            {messages.map((m, i) => (
+              <div
+                key={i}
+                className={`message-row ${m.role === 'user' ? 'user' : ''} fade-up`}
+                style={{ animationDelay: `${i * 0.04}s` }}
+              >
+                <div className={`message-avatar ${m.role === 'user' ? 'user' : ''}`}>
+                  {m.role === 'assistant' ? <Bot size={16} /> : <User size={16} />}
                 </div>
 
-                {/* Cards */}
-                {m.cards && m.cards.length > 0 && (
-                  <div className="grid grid-cols-1 gap-3 mt-2">
-                    {m.cards.map((c, idx) => (
-                      <SchemeCard
-                        key={idx}
-                        title={c.title}
-                        category={c.category || 'कल्याणकारी योजना'}
-                        benefits={c.benefits}
-                        documents={c.documents || []}
-                      />
-                    ))}
-                  </div>
-                )}
+                <div className="message-stack">
+                  <div className="message-bubble">{m.text}</div>
 
-                {/* Eligibility alerts */}
-                {m.eligibility?.status === 'not_eligible' && (
-                  <div className="p-4 bg-rose-950/20 border border-rose-900/30 rounded-2xl flex gap-3">
-                    <AlertCircle className="text-rose-500 shrink-0 mt-0.5" size={18} />
-                    <div className="text-sm text-rose-200 space-y-1">
-                      <div className="font-semibold text-rose-400">पात्रता निकष पूर्ण होत नाहीत:</div>
-                      {(m.eligibility.reasons_mr || []).map((r: string, ix: number) => (
-                        <div key={ix}>• {r}</div>
+                  {m.cards && m.cards.length > 0 && (
+                    <div className="card-grid">
+                      {m.cards.map((c, idx) => (
+                        <SchemeCard
+                          key={idx}
+                          title={c.title}
+                          category={c.category || 'कल्याणकारी योजना'}
+                          benefits={c.benefits}
+                          documents={c.documents || []}
+                        />
                       ))}
                     </div>
-                  </div>
-                )}
+                  )}
 
-                {/* Application success */}
-                {m.eligibility?.apply_result && (
-                  <div className="p-4 bg-emerald-950/20 border border-emerald-900/30 rounded-2xl flex gap-3">
-                    <FileText className="text-emerald-500 shrink-0 mt-0.5" size={18} />
-                    <div className="text-sm text-emerald-200">
-                      <div className="font-bold text-emerald-400">अर्ज यशस्वीरित्या सबमिट झाला!</div>
-                      <div className="opacity-80 mt-1 font-mono">ID: {m.eligibility.apply_result.application_id}</div>
+                  {m.eligibility?.status === 'not_eligible' && (
+                    <div className="alert-card danger">
+                      <AlertCircle className="alert-icon danger" size={18} />
+                      <div className="text-sm text-slate-700 space-y-1">
+                        <div className="alert-title">पात्रता निकष पूर्ण होत नाहीत:</div>
+                        {(m.eligibility.reasons_mr || []).map((r: string, ix: number) => (
+                          <div key={ix}>• {r}</div>
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
+                  )}
 
-          {/* Interim STT */}
-          {interimText && (
-            <div className="flex flex-row-reverse gap-4 opacity-60 animate-pulse">
-              <div className="w-8 h-8 bg-slate-800 rounded-full flex items-center justify-center">
-                <User size={16} />
+                  {m.eligibility?.apply_result && (
+                    <div className="alert-card success">
+                      <FileText className="alert-icon success" size={18} />
+                      <div className="text-sm text-emerald-800">
+                        <div className="alert-title">अर्ज यशस्वीरित्या सबमिट झाला!</div>
+                        <div className="debug-mono">ID: {m.eligibility.apply_result.application_id}</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
-              <div className="px-5 py-3 bg-slate-800/50 rounded-2xl rounded-tr-none text-[15px] text-slate-400">
-                {interimText}...
-              </div>
-            </div>
-          )}
+            ))}
 
-          <div ref={bottomRef} />
+            {interimText && (
+              <div className="message-row user fade-up">
+                <div className="message-avatar user">
+                  <User size={16} />
+                </div>
+                <div className="message-bubble subtle">{interimText}...</div>
+              </div>
+            )}
+
+            <div ref={bottomRef} />
+          </div>
         </main>
 
-        {/* Footer Input */}
-        <footer className="fixed bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-slate-950 via-slate-950/95 to-transparent z-10">
-          <div className={`max-w-2xl mx-auto transition-all duration-300 ${showDebug ? 'mr-[340px]' : ''}`}>
+        <footer className="chat-footer">
+          <div className="chat-inner">
             <Recorder onAudio={handleAudio} disabled={status !== 'Online'} speaking={speaking} />
           </div>
         </footer>
       </div>
 
-      {/* RIGHT: Debug Sidebar */}
-      <div
-        className={`fixed right-0 top-14 bottom-0 w-80 bg-slate-950 border-l border-slate-800/60 p-4 overflow-y-auto transition-transform duration-300 ${
-          showDebug ? 'translate-x-0' : 'translate-x-full'
-        }`}
-      >
-        <ToolTimeline events={toolEvents} />
-      </div>
+      <aside className={`debug-panel ${showDebug ? 'open' : ''}`}>
+        <ToolTimeline events={toolEvents} logs={debugLogs} />
+      </aside>
     </div>
   )
 }

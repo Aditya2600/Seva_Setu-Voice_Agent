@@ -1,12 +1,14 @@
-# backend/app/agent/agent.py
 from __future__ import annotations
+import logging
 from typing import Any, Dict, Tuple, List
 
 from app.tools.scheme_rag import retrieve_schemes, select_best_scheme
 from app.tools.eligibility import check_eligibility
 from app.tools.mock_apply import submit_application
 from app.memory import parse_slot_answer
-from app.db import get_scheme_by_id, save_scheme  # if you have helper, else search from retrieved list
+from app.db import get_scheme_by_id, save_scheme
+
+logger = logging.getLogger("sevasetu")
 
 
 QUESTIONS_MR = {
@@ -31,9 +33,11 @@ async def run_agent_turn(
 
     tool_trace: List[Dict[str, Any]] = []
     state = _ensure_state_dict(state)
+    logger.debug("Agent turn session_id=%s conf=%.2f text_len=%d", session_id, stt_confidence, len(utterance or ""))
 
     # --- 0) Handle low confidence speech ---
     if stt_confidence < 0.35:
+        logger.info("Low STT confidence conf=%.2f", stt_confidence)
         plan = {
             "next_state": "RESPOND",
             "assistant_message_mr": "आवाज स्पष्ट नाही. कृपया पुन्हा हळू आणि स्पष्ट बोला.",
@@ -51,10 +55,12 @@ async def run_agent_turn(
     awaiting = slot.get("awaiting")
 
     if awaiting:
+        logger.debug("Slot awaiting field=%s", awaiting)
         val = parse_slot_answer(awaiting, utterance)
 
         if val is None:
             # ask same question again
+            logger.info("Slot answer missing field=%s", awaiting)
             msg = QUESTIONS_MR.get(awaiting, "कृपया माहिती सांगा.")
             plan = {"next_state":"ASK_MISSING","assistant_message_mr":msg,"questions_mr":[msg],"tool_calls":[],"ui_intent":"question","scheme_id":slot.get("scheme_id")}
             tool_trace.append({"type":"plan","plan":plan})
@@ -63,6 +69,7 @@ async def run_agent_turn(
 
         # save into profile
         profile[awaiting] = val
+        logger.debug("Slot answer field=%s value=%s", awaiting, val)
 
         # remove from missing list
         missing = [f for f in (slot.get("missing") or []) if f != awaiting]
@@ -72,6 +79,7 @@ async def run_agent_turn(
             slot["missing"] = missing
             slot["awaiting"] = next_field
             state["slot"] = slot
+            logger.debug("Slot remaining fields=%s", missing)
 
             msg = QUESTIONS_MR.get(next_field, "कृपया माहिती सांगा.")
             plan = {"next_state":"ASK_MISSING","assistant_message_mr":msg,"questions_mr":[msg],"tool_calls":[],"ui_intent":"question","scheme_id":slot.get("scheme_id")}
@@ -83,6 +91,7 @@ async def run_agent_turn(
         scheme_id = slot.get("scheme_id")
         scheme = get_scheme_by_id(conn, scheme_id)  # implement helper; OR load from schemes table
         elig = check_eligibility(profile, scheme)
+        logger.info("Eligibility recheck status=%s", elig.get("status"))
 
         # clear slot mode
         state["slot"] = {}
@@ -102,11 +111,14 @@ async def run_agent_turn(
 
     # --- 2) Normal mode: retrieval -> eligibility -> maybe slot-fill ---
     # RAG
+    logger.info("RAG retrieve query_len=%d", len(utterance or ""))
     tool_trace.append({"type":"tool_call","tool":"scheme_retrieval","input":{"query_mr":utterance,"k":5}})
     schemes = retrieve_schemes(utterance, k=5)
     tool_trace.append({"type":"tool_result","tool":"scheme_retrieval","output":{"count":len(schemes)}})
+    logger.info("RAG retrieved count=%d", len(schemes))
 
     if not schemes:
+        logger.info("RAG no matches")
         msg = "क्षमस्व, मला योग्य योजना सापडली नाही. कृपया तुमची गरज थोडी अधिक स्पष्ट सांगा."
         plan = {"next_state":"RESPOND","assistant_message_mr":msg,"questions_mr":[],"tool_calls":[],"ui_intent":"error","scheme_id":None}
         tool_trace.append({"type":"plan","plan":plan})
@@ -117,16 +129,19 @@ async def run_agent_turn(
     scheme = select_best_scheme(utterance, schemes)
     scheme_id = scheme.get("scheme_id")
     save_scheme(conn, scheme)
+    logger.info("Scheme selected scheme_id=%s", scheme_id)
 
     # eligibility check
     tool_trace.append({"type":"tool_call","tool":"eligibility_check","input":{"scheme_id":scheme_id}})
     elig = check_eligibility(profile, scheme)
     tool_trace.append({"type":"tool_result","tool":"eligibility_check","output":elig})
+    logger.info("Eligibility status=%s", elig.get("status"))
 
     # if needs info -> enter slot-fill mode (one-by-one!)
     if elig.get("status") == "needs_more_info":
         missing = elig.get("missing_fields") or []
         if missing:
+            logger.info("Eligibility needs info missing=%s", missing)
             state["slot"] = {"scheme_id": scheme_id, "missing": missing, "awaiting": missing[0]}
             q = QUESTIONS_MR.get(missing[0], "कृपया माहिती सांगा.")
             msg = f"{scheme.get('name_mr','योजना')} साठी पात्रता तपासण्यासाठी:\n{q}"

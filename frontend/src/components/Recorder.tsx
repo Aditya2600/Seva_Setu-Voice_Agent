@@ -18,6 +18,7 @@ export default function Recorder({ onAudio, disabled, speaking }: Props){
   const recRef=useRef<MediaRecorder|null>(null)
   const chunks=useRef<BlobPart[]>([])
   const canvasRef=useRef<HTMLCanvasElement|null>(null)
+  const accentRef=useRef<string>('')
 
   const audioCtxRef=useRef<AudioContext|null>(null)
   const analyserRef=useRef<AnalyserNode|null>(null)
@@ -41,7 +42,11 @@ export default function Recorder({ onAudio, disabled, speaking }: Props){
 
     ctx.clearRect(0,0,canvas.width,canvas.height)
     ctx.lineWidth=2
-    ctx.strokeStyle='rgba(56,189,248,0.9)'
+    if(!accentRef.current){
+      const raw=getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()
+      accentRef.current=raw || '#1aa08d'
+    }
+    ctx.strokeStyle=accentRef.current
     ctx.beginPath()
 
     const slice = canvas.width / len
@@ -107,34 +112,39 @@ export default function Recorder({ onAudio, disabled, speaking }: Props){
   useEffect(()=>()=>stopMeter(),[])
 
   return (
-    <div className="rounded-2xl border border-slate-800 bg-slate-900/40 backdrop-blur p-4 shadow-xl">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <div className="w-9 h-9 rounded-xl bg-sky-500/20 flex items-center justify-center">
-            <Mic size={18} className="text-sky-300" />
+    <div className="recorder-card fade-up">
+      <div className="recorder-header">
+        <div className="recorder-meta">
+          <div className="recorder-icon">
+            <Mic size={18} />
           </div>
           <div>
-            <div className="font-semibold">Voice Input</div>
-            <div className="text-xs text-slate-400">
+            <div className="recorder-title">Voice Input</div>
+            <div className="recorder-sub">
               {recording ? (voice ? 'Voice detected ✅' : 'Listening…') : 'Tap to speak'}
             </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          {speaking && <div className="text-xs text-emerald-300 flex items-center gap-1"><Volume2 size={14}/> बोलत आहे…</div>}
+        <div className="recorder-actions">
+          {speaking && (
+            <span className="chip accent">
+              <Volume2 size={14} /> Speaking
+            </span>
+          )}
           {!recording ? (
-            <button onClick={start} disabled={disabled}
-              className="px-4 py-2 rounded-xl bg-sky-500 text-slate-950 font-semibold hover:bg-sky-400 disabled:opacity-50">Record</button>
+            <button onClick={start} disabled={disabled} className="btn btn-primary">
+              Record
+            </button>
           ) : (
-            <button onClick={stop} className="px-4 py-2 rounded-xl bg-rose-500 text-slate-950 font-semibold hover:bg-rose-400 flex items-center gap-2">
-              <Square size={14}/> Stop
+            <button onClick={stop} className="btn btn-danger">
+              <Square size={14} /> Stop
             </button>
           )}
         </div>
       </div>
-      <div className="mt-3">
-        <canvas ref={canvasRef} width={900} height={90} className="w-full rounded-xl bg-slate-950/60 border border-slate-800" />
+      <div className="recorder-meter">
+        <canvas ref={canvasRef} width={900} height={90} className="w-full" />
       </div>
     </div>
   )

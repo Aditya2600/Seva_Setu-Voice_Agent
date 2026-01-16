@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import os
 from pydantic import Field
 from pydantic_settings import BaseSettings
@@ -7,42 +8,73 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Settings(BaseSettings):
-    stt_provider: str = Field(default=os.getenv("STT_PROVIDER","whisper"))
-    tts_provider: str = Field(default=os.getenv("TTS_PROVIDER","mms"))
+    """Runtime configuration loaded from .env / environment.
 
-    ollama_base_url: str = Field(default=os.getenv("OLLAMA_BASE_URL","http://127.0.0.1:11434"))
-    ollama_chat_model: str = Field(default=os.getenv("OLLAMA_CHAT_MODEL","llama3.1:8b"))
+    Keep this minimal for the demo; optional providers remain available but non-required.
+    """
 
-    ollama_num_ctx: int = Field(default=int(os.getenv("OLLAMA_NUM_CTX","2048")))
-    ollama_num_predict: int = Field(default=int(os.getenv("OLLAMA_NUM_PREDICT","384")))
-    ollama_temperature: float = Field(default=float(os.getenv("OLLAMA_TEMPERATURE","0.1")))
-    ollama_top_p: float = Field(default=float(os.getenv("OLLAMA_TOP_P","0.9")))
-    ollama_repeat_penalty: float = Field(default=float(os.getenv("OLLAMA_REPEAT_PENALTY","1.12")))
+    # --- Providers ---
+    stt_provider: str = Field(default="whisper")
+    tts_provider: str = Field(default="mms")
 
-    llm_provider: str = Field(default=os.getenv("LLM_PROVIDER",""))
-    groq_api_key: str = Field(default=os.getenv("GROQ_API_KEY",""))
-    groq_model: str = Field(default=os.getenv("GROQ_MODEL","llama-3.1-8b-instant"))
-    groq_base_url: str = Field(default=os.getenv("GROQ_BASE_URL","https://api.groq.com/openai/v1"))
+    # --- Optional LLM brain ---
+    # If not set, the agent should fall back to rule-based logic.
+    llm_provider: str = Field(default="")  # "ollama" | "groq" | "" (disabled)
 
-    whisper_model: str = Field(default=os.getenv("WHISPER_MODEL","medium"))
-    whisper_device: str = Field(default=os.getenv("WHISPER_DEVICE","cpu"))
-    whisper_compute_type: str = Field(default=os.getenv("WHISPER_COMPUTE_TYPE","int8"))
+    # Ollama (optional)
+    ollama_base_url: str = Field(default="http://127.0.0.1:11434")
+    ollama_chat_model: str = Field(default="llama3.2:3b")
 
-    torch_num_threads: int = Field(default=int(os.getenv("TORCH_NUM_THREADS","4")))
-    torch_num_interop_threads: int = Field(default=int(os.getenv("TORCH_NUM_INTEROP_THREADS","2")))
+    # Tunables for Ollama (optional; safe defaults)
+    ollama_num_ctx: int = Field(default=2048)
+    ollama_num_predict: int = Field(default=384)
+    ollama_temperature: float = Field(default=0.1)
+    ollama_top_p: float = Field(default=0.9)
+    ollama_repeat_penalty: float = Field(default=1.12)
 
-    sqlite_path: str = Field(default=os.getenv("SQLITE_PATH","./data/app.db"))
-    log_level: str = Field(default=os.getenv("LOG_LEVEL","INFO"))
+    # Groq (optional)
+    groq_api_key: str = Field(default="")
+    groq_model: str = Field(default="llama-3.1-8b-instant")
+    groq_base_url: str = Field(default="https://api.groq.com/openai/v1")
+
+    # Generic LLM timeout (used by Groq helper too)
+    llm_timeout_seconds: int = Field(default=30)
+
+    # --- Whisper STT ---
+    whisper_model: str = Field(default="medium")
+    whisper_device: str = Field(default="cpu")
+    whisper_compute_type: str = Field(default="int8")
+
+    # --- Performance (Mac-friendly) ---
+    torch_num_threads: int = Field(default=4)
+    torch_num_interop_threads: int = Field(default=2)
+
+    # --- Storage ---
+    sqlite_path: str = Field(default="./data/app.db")
+
+    # --- Logging ---
+    log_level: str = Field(default="INFO")
 
     class Config:
         env_file = ".env"
         extra = "ignore"
 
+
 settings = Settings()
 
+# Apply torch thread limits if torch is present
 try:
     import torch  # type: ignore
-    torch.set_num_threads(settings.torch_num_threads)
-    torch.set_num_interop_threads(settings.torch_num_interop_threads)
+
+    torch.set_num_threads(int(settings.torch_num_threads))
+    torch.set_num_interop_threads(int(settings.torch_num_interop_threads))
+except Exception:
+    pass
+
+# Make sure ffmpeg is found when running from GUI shells (optional quality-of-life)
+# If you don't need it, you can delete this block.
+try:
+    if os.getenv("PATH") and "/opt/homebrew/bin" not in os.getenv("PATH", ""):
+        os.environ["PATH"] = os.environ["PATH"] + ":/opt/homebrew/bin"
 except Exception:
     pass

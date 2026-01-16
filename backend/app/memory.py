@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-import re
+import logging, re
+import difflib
 from typing import Any, Dict, Optional, Tuple
+
+logger = logging.getLogger("sevasetu")
 
 # -----------------------------
 # Marathi parsing helpers
@@ -84,6 +87,12 @@ def _to_ascii(text: str) -> str:
     return (text or "").translate(_DEV_TO_LAT)
 
 
+def _normalize_letters(text: str) -> str:
+    """Lowercase + keep only Latin/Devanagari letters for fuzzy matching."""
+    t = _to_ascii(text).lower()
+    return re.sub(r"[^a-z\u0900-\u097F]+", "", t)
+
+
 def _extract_first_number(text: str) -> Optional[float]:
     t = _to_ascii(text).replace(",", "").strip()
     m = re.search(r"(-?\d+(?:\.\d+)?)", t)
@@ -127,21 +136,43 @@ def parse_gender_answer(utterance: str) -> Optional[str]:
     # Marathi common forms
     if any(x in t for x in ["महिला", "स्त्री", "बाई", "female", "woman", "girl"]):
         return "female"
-    if any(x in t for x in ["पुरुष", "male", "man", "boy"]):
+    if any(x in t for x in ["पुरुष", "male", "man", "boy", "mail", "मेल"]):
         return "male"
 
     return None
 
 
 def parse_state_answer(utterance: str) -> Optional[str]:
-    t = (utterance or "").lower().strip()
+    raw = (utterance or "").strip()
+    t = raw.lower().strip()
+    nt = _normalize_letters(raw)
 
-    # direct map check
+    # 1) Direct map check (normalized substring)
     for k, v in STATE_MAP.items():
-        if k.lower() in t:
+        nk = _normalize_letters(k)
+        if nk and nk in nt:
             return v
 
-    # sometimes user says just "महाराष्ट्र"
+    # 2) Common STT misspellings for Maharashtra (very frequent)
+    # Examples observed: "मारास्ट्र", "महारास्ट्र", "महराष्ट्र", "महारष्ट्र", "maharastra"
+    maharashtra_hints = [
+        "महाराष्ट्र", "महारास्ट्र", "महारष्ट्र", "महराष्ट्र", "माराष्ट्र", "मारास्ट्र",
+        "maharashtra", "maharastra"
+    ]
+    for h in maharashtra_hints:
+        if _normalize_letters(h) in nt:
+            return "Maharashtra"
+
+    # 3) Lightweight fuzzy match against known states (handles slight ASR noise)
+    # Only trigger when the utterance is short-ish (single slot answer)
+    if len(nt) <= 18:
+        norm_map = { _normalize_letters(k): v for k, v in STATE_MAP.items() }
+        keys = [k for k in norm_map.keys() if k]
+        best = difflib.get_close_matches(nt, keys, n=1, cutoff=0.84)
+        if best:
+            return norm_map.get(best[0])
+
+    # 4) Last resort heuristic
     if "महा" in t and "राष्ट्र" in t:
         return "Maharashtra"
 
@@ -218,8 +249,8 @@ def extract_profile_updates(text: str) -> Dict[str, Any]:
     if s:
         updates["state"] = s
 
-    # age hints (look for "वय" keyword; if absent, still try but cautious)
-    if "वय" in t or "age" in t.lower():
+    # age hints (look for वय/age/वर्ष)
+    if ("वय" in t) or ("age" in t.lower()) or ("वर्ष" in t):
         a = parse_age_answer(t)
         if a is not None:
             updates["age"] = a
@@ -236,6 +267,8 @@ def extract_profile_updates(text: str) -> Dict[str, Any]:
     if any(k in t.lower() for k in ["व्यापारी", "trader", "shopkeeper", "दुकानदार", "business"]):
         updates["occupation"] = "trader"
 
+    if updates:
+        logger.debug("Profile updates extracted=%s", updates)
     return updates
 
 
@@ -304,4 +337,6 @@ def apply_updates_with_contradiction(
         # apply non-conflicting update
         profile[k] = v
 
+    if conflict:
+        logger.info("Profile conflict field=%s old=%s new=%s", conflict.get("field"), conflict.get("old"), conflict.get("new"))
     return profile, pending, conflict
